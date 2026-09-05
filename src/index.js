@@ -66,7 +66,9 @@ export default {
       object.writeHttpMetadata(headers);
       headers.set("etag", object.httpEtag);
       headers.set("cache-control", "public, max-age=3600");
-      headers.set("content-disposition", `inline; filename*=UTF-8''${encodeURIComponent(key.split('/').pop())}`);
+      const originalName = object.customMetadata?.originalName || key.split('/').pop();
+      const disposition = String(originalName).toLowerCase().endsWith('.apk') ? 'attachment' : 'inline';
+      headers.set("content-disposition", `${disposition}; filename*=UTF-8''${encodeURIComponent(originalName)}`);
       return new Response(object.body, { headers });
     }
 
