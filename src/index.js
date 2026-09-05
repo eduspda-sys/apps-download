@@ -8,6 +8,26 @@ export default {
 
     if (path === "/") return new Response(storePage(), { headers: HTML });
 
+    if (path === "/api/store" && request.method === "GET") {
+      const listed = await env.FILES.list({ limit: 500, include: ["customMetadata"] });
+      const apps = listed.objects
+        .filter((o) => !o.key.startsWith("_system/"))
+        .map((o) => fileInfo(o))
+        .filter((x) => x.format === "APK" && x.storePublished)
+        .sort((a, b) => String(a.name).localeCompare(String(b.name), "pt-BR"));
+      return json(apps.map((x) => ({
+        name: x.name,
+        originalName: x.originalName,
+        version: x.version,
+        description: x.description,
+        logoUrl: x.logoUrl,
+        shortUrl: x.shortUrl,
+        downloaderCode: x.downloaderCode,
+        size: x.size,
+        url: x.url,
+      })));
+    }
+
     if (path === "/admin") {
       if (!isAdmin(request, env)) return unauthorized();
       return new Response(adminPage(), { headers: HTML });
@@ -35,15 +55,17 @@ export default {
           const folder = isApk ? "apks" : sanitizeFolder(form.get("folder") || inferFolder(file.name));
           const displayNameRaw = String(form.get("displayName") || "").trim();
           const displayName = (displayNameRaw || removeExtension(file.name)).slice(0, 160);
-          const shortUrl = normalizeShortUrl(form.get("shortUrl"));
+          const shortUrl = normalizeOptionalUrl(form.get("shortUrl"), "Link encurtado");
           if (shortUrl.error) return json({ error: shortUrl.error }, 400);
           const downloaderCode = isApk ? String(form.get("downloaderCode") || "").trim().slice(0, 80) : "";
           const key = `${folder}/${clean}`;
-          const existed = await env.FILES.head(key);
+          const existing = await env.FILES.head(key);
+          const old = existing?.customMetadata || {};
 
           await env.FILES.put(key, file.stream(), {
             httpMetadata: { contentType: file.type || "application/octet-stream" },
             customMetadata: {
+              ...old,
               originalName: file.name,
               displayName,
               shortUrl: shortUrl.value,
@@ -53,7 +75,7 @@ export default {
 
           return json({
             ok: true,
-            replaced: Boolean(existed),
+            replaced: Boolean(existing),
             key,
             name: displayName,
             originalName: file.name,
@@ -79,10 +101,16 @@ export default {
           const old = object.customMetadata || {};
           const originalName = old.originalName || key.split("/").pop() || "arquivo";
           const displayName = String(body.displayName || removeExtension(originalName)).trim().slice(0, 160);
-          const shortUrl = normalizeShortUrl(body.shortUrl);
+          const shortUrl = normalizeOptionalUrl(body.shortUrl, "Link encurtado");
           if (shortUrl.error) return json({ error: shortUrl.error }, 400);
+
           const isApk = extensionOf(originalName) === "APK";
           const downloaderCode = isApk ? String(body.downloaderCode || "").trim().slice(0, 80) : "";
+          const version = isApk ? String(body.version || "").trim().slice(0, 60) : "";
+          const description = isApk ? String(body.description || "").trim().slice(0, 400) : "";
+          const logoCheck = isApk ? normalizeOptionalUrl(body.logoUrl, "Logo") : { value: "" };
+          if (logoCheck.error) return json({ error: logoCheck.error }, 400);
+          const storePublished = isApk && Boolean(body.storePublished) ? "1" : "0";
 
           await env.FILES.put(key, object.body, {
             httpMetadata: object.httpMetadata,
@@ -92,6 +120,10 @@ export default {
               displayName,
               shortUrl: shortUrl.value,
               downloaderCode,
+              version,
+              description,
+              logoUrl: logoCheck.value,
+              storePublished,
             },
           });
 
@@ -141,17 +173,23 @@ function fileInfo(o) {
     format: extensionOf(originalName),
     shortUrl: o.customMetadata?.shortUrl || "",
     downloaderCode: o.customMetadata?.downloaderCode || "",
+    version: o.customMetadata?.version || "",
+    description: o.customMetadata?.description || "",
+    logoUrl: o.customMetadata?.logoUrl || "",
+    storePublished: o.customMetadata?.storePublished === "1",
     size: o.size,
     uploaded: o.uploaded,
     url: fileUrl(o.key),
   };
 }
 
-function normalizeShortUrl(value) {
+function normalizeOptionalUrl(value, label) {
   const v = String(value || "").trim();
   if (!v) return { value: "" };
-  if (!/^https?:\/\//i.test(v)) return { value: "", error: "O link encurtado precisa começar com http:// ou https://" };
-  if (v.length > 500) return { value: "", error: "Link encurtado muito longo" };
+  if (!/^https?:\/\//i.test(v) && !v.startsWith("/files/")) {
+    return { value: "", error: `${label || "Link"} precisa começar com http://, https:// ou /files/` };
+  }
+  if (v.length > 500) return { value: "", error: `${label || "Link"} muito longo` };
   return { value: v };
 }
 
@@ -219,38 +257,123 @@ function json(data, status = 200) {
 
 function storePage() {
   return `<!doctype html>
-<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#080b12">
 <title>TVON Store</title>
-<style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui,Arial;background:#080b12;color:#f5f7fb}.wrap{max-width:1120px;margin:auto;padding:32px 20px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:34px}.brand{font-size:26px;font-weight:800}.brand span{color:#6da8ff}.muted{color:#8f9aab}.hero{padding:34px;border:1px solid #20283a;border-radius:24px;background:linear-gradient(135deg,#111827,#0b1020);margin-bottom:26px}.hero h1{font-size:38px;margin:0 0 8px}.empty{text-align:center;padding:55px 20px;color:#8993a5;border:1px dashed #273149;border-radius:18px}.admin{font-size:13px;color:#8993a5;text-decoration:none}</style>
-</head><body><div class="wrap"><div class="top"><div class="brand">TVON <span>Store</span></div><a class="admin" href="/admin">Admin</a></div><section class="hero"><h1>Aplicativos em um só lugar.</h1><div class="muted">Downloads rápidos e organizados.</div></section><div class="empty">Nenhum aplicativo publicado ainda.</div></div></body></html>`;
+<style>
+:root{color-scheme:dark;--bg:#080b12;--panel:#0e1421;--line:#20283a;--muted:#8f9aab;--blue:#2d7cff;--blue2:#67a4ff}
+*{box-sizing:border-box}
+body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Arial,sans-serif;background:radial-gradient(circle at 20% -10%,#13213f 0,transparent 30%),var(--bg);color:#f5f7fb;min-height:100vh}
+.wrap{max-width:1180px;margin:auto;padding:30px 20px 60px}
+.top{display:flex;align-items:center;justify-content:space-between;margin-bottom:28px}
+.brand{font-size:27px;font-weight:900;letter-spacing:-.5px}.brand span{color:var(--blue2)}
+.tag{font-size:12px;color:#aab5c7;border:1px solid #26324a;background:#0d1422;padding:7px 10px;border-radius:999px}
+.hero{border:1px solid var(--line);border-radius:26px;padding:34px;background:linear-gradient(135deg,#111827,#0a1020 70%);box-shadow:0 22px 70px rgba(0,0,0,.25)}
+.hero h1{font-size:clamp(30px,6vw,48px);letter-spacing:-1.5px;margin:0 0 10px}.hero p{margin:0;color:#9ba7ba;font-size:16px}
+.searchbar{margin-top:22px;display:flex;gap:10px}.searchbar input{width:100%;border:1px solid #2a3650;background:#090f1a;color:#fff;border-radius:14px;padding:14px 16px;font:inherit;outline:none}.searchbar input:focus{border-color:#4a89ff;box-shadow:0 0 0 3px rgba(45,124,255,.12)}
+.section{display:flex;align-items:end;justify-content:space-between;gap:15px;margin:28px 0 15px}.section h2{margin:0;font-size:20px}.count{color:var(--muted);font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(255px,1fr));gap:16px}
+.card{border:1px solid var(--line);background:linear-gradient(180deg,#0f1625,#0c121e);border-radius:22px;padding:18px;display:flex;flex-direction:column;min-height:320px;box-shadow:0 14px 36px rgba(0,0,0,.18)}
+.apphead{display:flex;gap:14px;align-items:center}.logo{width:68px;height:68px;border-radius:17px;border:1px solid #283550;background:#111a2b;display:grid;place-items:center;overflow:hidden;flex:0 0 auto}.logo img{width:100%;height:100%;object-fit:cover}.fallback{font-size:29px;font-weight:900;color:#7eafff}
+.title{min-width:0}.title h3{margin:0 0 5px;font-size:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta{font-size:12px;color:#8996aa}
+.desc{color:#aab5c6;font-size:13px;line-height:1.45;margin:16px 0;min-height:38px}
+.code{display:flex;align-items:center;justify-content:space-between;gap:10px;border:1px dashed #34425d;background:#0a101b;padding:10px 12px;border-radius:12px;margin-top:auto}.code span{font-size:12px;color:#8d99aa}.code strong{font-size:17px;letter-spacing:.6px}.code button{border:0;background:transparent;color:#74a8ff;cursor:pointer;font-weight:700}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:12px}.btn{display:flex;align-items:center;justify-content:center;text-decoration:none;border-radius:12px;padding:12px 10px;font-weight:800;font-size:13px;border:1px solid #2a3650;color:#cad7eb;background:#121c2d}.btn.primary{background:var(--blue);border-color:var(--blue);color:#fff}.btn.full{grid-column:1/-1}
+.empty{padding:55px 20px;border:1px dashed #2a3650;border-radius:18px;text-align:center;color:#8895a8}.hidden{display:none!important}
+.footer{text-align:center;color:#657186;font-size:12px;margin-top:34px}
+@media(max-width:560px){.wrap{padding:20px 14px 45px}.hero{padding:25px 20px}.actions{grid-template-columns:1fr}.btn.full{grid-column:auto}.tag{display:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><div class="brand">TVON <span>Store</span></div><div class="tag">APKs para Android</div></div>
+  <section class="hero">
+    <h1>Seus aplicativos, em um só lugar.</h1>
+    <p>Escolha o app e baixe diretamente para seu dispositivo.</p>
+    <div class="searchbar"><input id="search" type="search" placeholder="Pesquisar aplicativo..." autocomplete="off"></div>
+  </section>
+  <div class="section"><h2>Aplicativos</h2><div id="count" class="count"></div></div>
+  <div id="grid" class="grid"><div class="empty">Carregando aplicativos...</div></div>
+  <div class="footer">TVON Store</div>
+</div>
+<script>
+const grid=document.getElementById('grid'),search=document.getElementById('search'),count=document.getElementById('count');
+let apps=[];
+function fmt(n){if(n<1024)return n+' B';if(n<1048576)return(n/1024).toFixed(1)+' KB';return(n/1048576).toFixed(1)+' MB'}
+function initials(name){return String(name||'A').trim().slice(0,2).toUpperCase()}
+function absUrl(u){if(!u)return'';if(u.startsWith('/'))return location.origin+u;return u}
+async function copyText(t,b){try{await navigator.clipboard.writeText(t);const old=b.textContent;b.textContent='Copiado!';setTimeout(function(){b.textContent=old},1200)}catch{prompt('Copie:',t)}}
+function render(){
+ const q=search.value.trim().toLowerCase();
+ const list=!q?apps:apps.filter(function(a){return[a.name,a.originalName,a.version,a.description,a.downloaderCode].join(' ').toLowerCase().includes(q)});
+ grid.replaceChildren();count.textContent=list.length+(list.length===1?' aplicativo':' aplicativos');
+ if(!list.length){const e=document.createElement('div');e.className='empty';e.textContent=q?'Nenhum aplicativo encontrado.':'Nenhum aplicativo publicado ainda.';grid.appendChild(e);return}
+ list.forEach(function(a){
+  const card=document.createElement('article');card.className='card';
+  const head=document.createElement('div');head.className='apphead';
+  const logo=document.createElement('div');logo.className='logo';
+  if(a.logoUrl){const img=document.createElement('img');img.src=absUrl(a.logoUrl);img.alt='';img.loading='lazy';img.onerror=function(){logo.textContent=initials(a.name);logo.classList.add('fallback')};logo.appendChild(img)}else{logo.textContent=initials(a.name);logo.classList.add('fallback')}
+  const title=document.createElement('div');title.className='title';
+  const h=document.createElement('h3');h.textContent=a.name||a.originalName;
+  const meta=document.createElement('div');meta.className='meta';meta.textContent=(a.version?'Versão '+a.version+' • ':'')+fmt(a.size);
+  title.append(h,meta);head.append(logo,title);card.appendChild(head);
+  const d=document.createElement('div');d.className='desc';d.textContent=a.description||'Aplicativo disponível para download.';card.appendChild(d);
+  if(a.downloaderCode){const c=document.createElement('div');c.className='code';const s=document.createElement('span');s.textContent='Código Downloader';const strong=document.createElement('strong');strong.textContent=a.downloaderCode;const cb=document.createElement('button');cb.type='button';cb.textContent='Copiar';cb.addEventListener('click',function(){copyText(a.downloaderCode,cb)});c.append(s,strong,cb);card.appendChild(c)}
+  const actions=document.createElement('div');actions.className='actions';
+  const direct=document.createElement('a');direct.className='btn primary'+(a.shortUrl?'':' full');direct.href=a.url;direct.textContent='Baixar APK';
+  actions.appendChild(direct);
+  if(a.shortUrl){const short=document.createElement('a');short.className='btn';short.href=a.shortUrl;short.target='_blank';short.rel='noopener';short.textContent='Link rápido';actions.appendChild(short)}
+  card.appendChild(actions);grid.appendChild(card);
+ })
+}
+fetch('/api/store').then(function(r){if(!r.ok)throw new Error();return r.json()}).then(function(data){apps=Array.isArray(data)?data:[];render()}).catch(function(){grid.innerHTML='<div class="empty">Não foi possível carregar os aplicativos.</div>';count.textContent=''});
+search.addEventListener('input',render);
+</script>
+</body>
+</html>`;
 }
 
 function adminPage() {
   return `<!doctype html>
-<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TVON Store • Admin</title>
 <style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui,Arial;background:#080b12;color:#f4f7fb}.wrap{max-width:1180px;margin:auto;padding:30px 18px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px}h1{margin:0;font-size:25px}.sub{color:#8793a7;margin-top:5px}.box{border:1px solid #20283a;background:#0e1421;border-radius:20px;padding:20px;margin-bottom:20px}.drop{border:1px dashed #384764;border-radius:16px;padding:26px}select,input,button{font:inherit}select,input[type=file],input[type=text],input[type=url]{background:#0a0f19;color:#fff;border:1px solid #2a3449;padding:11px;border-radius:10px;min-width:0}.controls{display:grid;grid-template-columns:1.3fr 1fr 150px auto;gap:10px;margin-top:15px}.meta-controls{display:grid;grid-template-columns:1fr 1.2fr .7fr;gap:10px;margin-top:10px}button{background:#2878ff;color:white;border:0;padding:11px 16px;border-radius:10px;font-weight:700;cursor:pointer}button:disabled{opacity:.55;cursor:not-allowed}button.secondary{background:#182338;color:#bcd2ff}button.danger{background:#2a1014;color:#ff8a95}.toolbar{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:12px}.search{width:min(100%,420px)}.row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:15px;align-items:center;padding:16px 0;border-bottom:1px solid #1b2333}.row:last-child{border:0}.name{font-weight:750;font-size:16px}.filename,.details{font-size:12px;color:#8793a7;margin-top:4px;overflow-wrap:anywhere}.details strong{color:#c4cee0}.actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.badge{display:inline-flex;border:1px solid #2a3449;background:#0a0f19;border-radius:999px;padding:4px 8px;font-size:11px;color:#b9c4d7;margin-left:6px}.link{color:#7eacff;text-decoration:none}.status{margin-top:12px;color:#9eabc0;min-height:18px}.status.ok{color:#78e59a}.status.err{color:#ff8a95}.empty{padding:20px 0;color:#8793a7}.hidden{display:none!important}.hint{font-size:12px;color:#728096;margin-top:8px}@media(max-width:780px){.controls,.meta-controls{grid-template-columns:1fr}.row{grid-template-columns:1fr}.actions{justify-content:flex-start}.toolbar{align-items:stretch;flex-direction:column}.search{width:100%}}
-</style></head>
-<body><div class="wrap">
-<div class="top"><div><h1>TVON Store • Admin</h1><div class="sub">Upload e gerenciamento de arquivos no R2</div></div><a class="link" href="/">Ver loja</a></div>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui,Arial;background:#080b12;color:#f4f7fb}.wrap{max-width:1180px;margin:auto;padding:30px 18px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px}h1{margin:0;font-size:25px}.sub{color:#8793a7;margin-top:5px}.box{border:1px solid #20283a;background:#0e1421;border-radius:20px;padding:20px;margin-bottom:20px}.drop{border:1px dashed #384764;border-radius:16px;padding:26px}select,input,button,textarea{font:inherit}select,input[type=file],input[type=text],input[type=url],textarea{background:#0a0f19;color:#fff;border:1px solid #2a3449;padding:11px;border-radius:10px;min-width:0}.controls{display:grid;grid-template-columns:1.3fr 1fr 150px auto;gap:10px;margin-top:15px}.meta-controls{display:grid;grid-template-columns:1fr 1.2fr .7fr;gap:10px;margin-top:10px}button{background:#2878ff;color:white;border:0;padding:11px 16px;border-radius:10px;font-weight:700;cursor:pointer}button:disabled{opacity:.55;cursor:not-allowed}button.secondary{background:#182338;color:#bcd2ff}button.store{background:#123222;color:#8ff2b4}button.danger{background:#2a1014;color:#ff8a95}.toolbar{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:12px}.search{width:min(100%,420px)}.row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:15px;align-items:center;padding:16px 0;border-bottom:1px solid #1b2333}.row:last-child{border:0}.name{font-weight:750;font-size:16px}.filename,.details{font-size:12px;color:#8793a7;margin-top:4px;overflow-wrap:anywhere}.actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.badge{display:inline-flex;border:1px solid #2a3449;background:#0a0f19;border-radius:999px;padding:4px 8px;font-size:11px;color:#b9c4d7;margin-left:6px}.pub{color:#83e5a6;border-color:#26593a;background:#10261a}.link{color:#7eacff;text-decoration:none}.status{margin-top:12px;color:#9eabc0;min-height:18px}.status.ok{color:#78e59a}.status.err{color:#ff8a95}.empty{padding:20px 0;color:#8793a7}.hint{font-size:12px;color:#728096;margin-top:8px}
+dialog{width:min(92vw,600px);border:1px solid #2b3851;border-radius:18px;background:#0e1421;color:#fff;padding:0;box-shadow:0 30px 90px #0009}dialog::backdrop{background:#000a}.modal{padding:22px}.modal h2{margin:0 0 6px}.form{display:grid;gap:10px;margin-top:18px}.form label{display:grid;gap:6px;font-size:12px;color:#9da8ba}.form input,.form textarea{width:100%}.form textarea{min-height:90px;resize:vertical}.check{display:flex!important;grid-template-columns:auto 1fr!important;align-items:center;gap:9px!important;font-size:14px!important;color:#dbe4f1!important}.modal-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}
+@media(max-width:780px){.controls,.meta-controls{grid-template-columns:1fr}.row{grid-template-columns:1fr}.actions{justify-content:flex-start}.toolbar{align-items:stretch;flex-direction:column}.search{width:100%}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="top"><div><h1>TVON Store • Admin</h1><div class="sub">Gerenciador de arquivos no R2</div></div><a class="link" href="/">Ver loja pública</a></div>
 <div class="box"><div class="drop"><strong>Enviar arquivo</strong><div class="sub">O link direto mantém o nome do arquivo. Reenviar o mesmo nome substitui o arquivo sem mudar o endereço.</div>
 <div class="controls"><input id="file" type="file"><input id="displayName" type="text" maxlength="160" placeholder="Nome para identificar"><select id="folder"><option value="apks">APK</option><option value="images">Imagem</option><option value="files">Outro arquivo</option></select><button id="uploadBtn" type="button">Enviar</button></div>
-<div class="meta-controls"><input id="shortUrl" type="url" maxlength="500" placeholder="Link encurtado Abrela (opcional)"><input id="downloaderCode" type="text" maxlength="80" placeholder="Código Downloader (somente APK)"><div class="hint">Você pode preencher esses dados depois em Editar dados.</div></div>
+<div class="meta-controls"><input id="shortUrl" type="url" maxlength="500" placeholder="Link encurtado Abrela (opcional)"><input id="downloaderCode" type="text" maxlength="80" placeholder="Código Downloader (somente APK)"><div class="hint">Você pode completar os dados depois em Editar dados.</div></div>
 <div id="status" class="status"></div></div></div>
 <div class="box"><div class="toolbar"><strong>Arquivos enviados</strong><input id="search" class="search" type="text" placeholder="Pesquisar nome, APK, código Downloader, Abrela..."></div><div id="list" class="sub">Carregando...</div></div>
 </div>
+
+<dialog id="storeDialog"><div class="modal">
+  <h2>Configurar na loja</h2><div class="sub" id="storeFile"></div>
+  <div class="form">
+    <label>Nome do aplicativo<input id="storeName" type="text" maxlength="160"></label>
+    <label>Versão<input id="storeVersion" type="text" maxlength="60" placeholder="Ex.: 1.4.2"></label>
+    <label>Descrição curta<textarea id="storeDescription" maxlength="400" placeholder="Descrição que aparecerá no card"></textarea></label>
+    <label>URL da logo<input id="storeLogo" type="url" maxlength="500" placeholder="Cole o link de uma imagem enviada ao R2"></label>
+    <label class="check"><input id="storePublished" type="checkbox"> Publicar este APK na loja</label>
+  </div>
+  <div class="modal-actions"><button id="storeCancel" class="secondary" type="button">Cancelar</button><button id="storeSave" type="button">Salvar</button></div>
+</div></dialog>
+
 <script>
-const fileInput=document.getElementById('file');
-const displayNameInput=document.getElementById('displayName');
-const folderInput=document.getElementById('folder');
-const shortUrlInput=document.getElementById('shortUrl');
-const downloaderCodeInput=document.getElementById('downloaderCode');
-const uploadBtn=document.getElementById('uploadBtn');
-const statusEl=document.getElementById('status');
-const listEl=document.getElementById('list');
-const searchInput=document.getElementById('search');
-let allFiles=[];
+const fileInput=document.getElementById('file'),displayNameInput=document.getElementById('displayName'),folderInput=document.getElementById('folder'),shortUrlInput=document.getElementById('shortUrl'),downloaderCodeInput=document.getElementById('downloaderCode'),uploadBtn=document.getElementById('uploadBtn'),statusEl=document.getElementById('status'),listEl=document.getElementById('list'),searchInput=document.getElementById('search');
+const dlg=document.getElementById('storeDialog'),storeFile=document.getElementById('storeFile'),storeName=document.getElementById('storeName'),storeVersion=document.getElementById('storeVersion'),storeDescription=document.getElementById('storeDescription'),storeLogo=document.getElementById('storeLogo'),storePublished=document.getElementById('storePublished'),storeSave=document.getElementById('storeSave'),storeCancel=document.getElementById('storeCancel');
+let allFiles=[],editingStoreItem=null;
 
 function fmt(n){if(n<1024)return n+' B';if(n<1048576)return(n/1024).toFixed(1)+' KB';return(n/1048576).toFixed(1)+' MB'}
 function setStatus(text,type){statusEl.textContent=text||'';statusEl.className='status'+(type?' '+type:'')}
@@ -261,7 +384,7 @@ function syncApkField(){downloaderCodeInput.disabled=!isApkSelection();downloade
 
 function renderFiles(){
  const q=searchInput.value.trim().toLowerCase();
- const data=!q?allFiles:allFiles.filter(function(x){return[x.name,x.originalName,x.format,x.key,x.shortUrl,x.downloaderCode].join(' ').toLowerCase().includes(q)});
+ const data=!q?allFiles:allFiles.filter(function(x){return[x.name,x.originalName,x.format,x.key,x.shortUrl,x.downloaderCode,x.version,x.description].join(' ').toLowerCase().includes(q)});
  listEl.replaceChildren();
  if(!data.length){const e=document.createElement('div');e.className='empty';e.textContent=q?'Nenhum arquivo encontrado.':'Nenhum arquivo enviado.';listEl.appendChild(e);return}
  data.forEach(function(item){
@@ -269,15 +392,15 @@ function renderFiles(){
   const info=document.createElement('div');
   const name=document.createElement('div');name.className='name';name.textContent=item.name||item.originalName;
   const badge=document.createElement('span');badge.className='badge';badge.textContent=item.format||'ARQUIVO';name.appendChild(badge);
+  if(item.storePublished){const p=document.createElement('span');p.className='badge pub';p.textContent='NA LOJA';name.appendChild(p)}
   const filename=document.createElement('div');filename.className='filename';filename.textContent=item.originalName+' • '+fmt(item.size);
-  const details=document.createElement('div');details.className='details';
-  const parts=[];if(item.shortUrl)parts.push('Abrela: '+item.shortUrl);if(item.downloaderCode)parts.push('Downloader: '+item.downloaderCode);details.textContent=parts.join('   •   ')||'Sem link encurtado/código cadastrado';
-  info.append(name,filename,details);
+  const details=document.createElement('div');details.className='details';const parts=[];if(item.version)parts.push('Versão '+item.version);if(item.shortUrl)parts.push('Abrela: '+item.shortUrl);if(item.downloaderCode)parts.push('Downloader: '+item.downloaderCode);details.textContent=parts.join(' • ')||'Sem informações extras';info.append(name,filename,details);
   const actions=document.createElement('div');actions.className='actions';
   const direct=document.createElement('button');direct.type='button';direct.textContent='Link direto';direct.addEventListener('click',function(){copyText(location.origin+item.url,'Link direto')});actions.appendChild(direct);
   if(item.shortUrl){const short=document.createElement('button');short.type='button';short.className='secondary';short.textContent='Abrela';short.addEventListener('click',function(){copyText(item.shortUrl,'Abrela')});actions.appendChild(short)}
   if(item.downloaderCode){const code=document.createElement('button');code.type='button';code.className='secondary';code.textContent='Código '+item.downloaderCode;code.addEventListener('click',function(){copyText(item.downloaderCode,'Código Downloader')});actions.appendChild(code)}
   const edit=document.createElement('button');edit.type='button';edit.className='secondary';edit.textContent='Editar dados';edit.addEventListener('click',function(){editMeta(item)});actions.appendChild(edit);
+  if(item.format==='APK'){const store=document.createElement('button');store.type='button';store.className='store';store.textContent=item.storePublished?'Editar loja':'Publicar na loja';store.addEventListener('click',function(){openStore(item)});actions.appendChild(store)}
   const del=document.createElement('button');del.type='button';del.className='danger';del.textContent='Excluir';del.addEventListener('click',async function(){if(!confirm('Excluir '+item.originalName+'?'))return;del.disabled=true;try{const r=await fetch('/api/files/'+encodeURIComponent(item.key),{method:'DELETE',credentials:'same-origin'});const j=await readJson(r);if(!r.ok)throw new Error(j.error||'Falha ao excluir');setStatus('Arquivo excluído.','ok');await loadFiles()}catch(e){setStatus(e.message||'Falha ao excluir.','err');del.disabled=false}});actions.appendChild(del);
   row.append(info,actions);listEl.appendChild(row);
  })
@@ -286,11 +409,24 @@ function renderFiles(){
 async function editMeta(item){
  const name=prompt('Nome para identificar:',item.name||'');if(name===null)return;
  const short=prompt('Link encurtado Abrela (pode deixar vazio):',item.shortUrl||'');if(short===null)return;
- let code=item.downloaderCode||'';
- if(item.format==='APK'){const c=prompt('Código Downloader (pode deixar vazio):',code);if(c===null)return;code=c}else{code=''}
+ let code=item.downloaderCode||'';if(item.format==='APK'){const c=prompt('Código Downloader (pode deixar vazio):',code);if(c===null)return;code=c}else{code=''}
  setStatus('Salvando informações...');
- try{const r=await fetch('/api/file-meta',{method:'PATCH',headers:{'content-type':'application/json'},credentials:'same-origin',body:JSON.stringify({key:item.key,displayName:name,shortUrl:short,downloaderCode:code})});const j=await readJson(r);if(!r.ok)throw new Error(j.error||'Falha ao atualizar');setStatus('Informações atualizadas.','ok');await loadFiles()}catch(e){setStatus(e.message||'Falha ao atualizar.','err')}
+ try{const r=await fetch('/api/file-meta',{method:'PATCH',headers:{'content-type':'application/json'},credentials:'same-origin',body:JSON.stringify({key:item.key,displayName:name,shortUrl:short,downloaderCode:code,version:item.version||'',description:item.description||'',logoUrl:item.logoUrl||'',storePublished:Boolean(item.storePublished)})});const j=await readJson(r);if(!r.ok)throw new Error(j.error||'Falha ao atualizar');setStatus('Informações atualizadas.','ok');await loadFiles()}catch(e){setStatus(e.message||'Falha ao atualizar.','err')}
 }
+
+function openStore(item){
+ editingStoreItem=item;storeFile.textContent=item.originalName;storeName.value=item.name||'';storeVersion.value=item.version||'';storeDescription.value=item.description||'';storeLogo.value=item.logoUrl||'';storePublished.checked=Boolean(item.storePublished);dlg.showModal()
+}
+storeCancel.addEventListener('click',function(){dlg.close()});
+storeSave.addEventListener('click',async function(){
+ if(!editingStoreItem)return;storeSave.disabled=true;
+ try{
+  const item=editingStoreItem;
+  const r=await fetch('/api/file-meta',{method:'PATCH',headers:{'content-type':'application/json'},credentials:'same-origin',body:JSON.stringify({key:item.key,displayName:storeName.value,shortUrl:item.shortUrl||'',downloaderCode:item.downloaderCode||'',version:storeVersion.value,description:storeDescription.value,logoUrl:storeLogo.value,storePublished:storePublished.checked})});
+  const j=await readJson(r);if(!r.ok)throw new Error(j.error||'Falha ao salvar');
+  dlg.close();setStatus(storePublished.checked?'APK publicado na loja.':'Configuração da loja salva.','ok');await loadFiles()
+ }catch(e){setStatus(e.message||'Falha ao salvar.','err')}finally{storeSave.disabled=false}
+});
 
 async function loadFiles(){listEl.textContent='Carregando...';try{const r=await fetch('/api/files',{credentials:'same-origin'});const j=await readJson(r);if(!r.ok)throw new Error(j.error||'Falha ao carregar arquivos');allFiles=Array.isArray(j)?j:[];renderFiles()}catch(e){listEl.textContent=e.message||'Falha ao carregar arquivos.'}}
 
@@ -301,5 +437,7 @@ uploadBtn.addEventListener('click',async function(){
  try{const r=await fetch('/api/upload',{method:'POST',body:form,credentials:'same-origin'});const j=await readJson(r);if(!r.ok)throw new Error(j.error||'Falha no upload');fileInput.value='';displayNameInput.value='';shortUrlInput.value='';downloaderCodeInput.value='';syncApkField();setStatus(j.replaced?'Arquivo substituído mantendo o mesmo link.':'Enviado com sucesso.','ok');await loadFiles()}catch(e){setStatus(e.message||'Falha no upload.','err')}finally{uploadBtn.disabled=false}
 });
 fileInput.addEventListener('change',syncApkField);folderInput.addEventListener('change',syncApkField);searchInput.addEventListener('input',renderFiles);syncApkField();loadFiles();
-</script></body></html>`;
+</script>
+</body>
+</html>`;
 }
