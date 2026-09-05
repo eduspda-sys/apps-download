@@ -17,13 +17,23 @@ export default {
       if (!isAdmin(request, env)) return unauthorized();
 
       if (path === "/api/files" && request.method === "GET") {
-        const listed = await env.FILES.list({ limit: 500 });
-        return json(listed.objects.map((o) => ({
-          key: o.key,
-          size: o.size,
-          uploaded: o.uploaded,
-          url: `/files/${encodeURIComponent(o.key)}`,
-        })));
+        const listed = await env.FILES.list({ limit: 500, include: ["customMetadata"] });
+        return json(listed.objects.map((o) => {
+          const base = o.key.split("/").pop() || o.key;
+          const fallbackOriginal = base.replace(/^\d{10,}-/, "");
+          const originalName = o.customMetadata?.originalName || fallbackOriginal;
+          const displayName = o.customMetadata?.displayName || removeExtension(originalName);
+          const format = extensionOf(originalName);
+          return {
+            key: o.key,
+            name: displayName,
+            originalName,
+            format,
+            size: o.size,
+            uploaded: o.uploaded,
+            url: fileUrl(o.key),
+          };
+        }));
       }
 
       if (path === "/api/upload" && request.method === "POST") {
@@ -34,14 +44,28 @@ export default {
 
           const folder = sanitizeFolder(form.get("folder") || inferFolder(file.name));
           const clean = sanitizeFilename(file.name);
-          const key = `${folder}/${Date.now()}-${clean}`;
+          const displayNameRaw = String(form.get("displayName") || "").trim();
+          const displayName = displayNameRaw || removeExtension(file.name);
+          const key = `${folder}/${clean}`;
+          const existed = await env.FILES.head(key);
 
           await env.FILES.put(key, file.stream(), {
             httpMetadata: { contentType: file.type || "application/octet-stream" },
-            customMetadata: { originalName: file.name },
+            customMetadata: {
+              originalName: file.name,
+              displayName: displayName.slice(0, 160),
+            },
           });
 
-          return json({ ok: true, key, url: `/files/${encodeURIComponent(key)}` });
+          return json({
+            ok: true,
+            replaced: Boolean(existed),
+            key,
+            name: displayName,
+            originalName: file.name,
+            format: extensionOf(file.name),
+            url: fileUrl(key),
+          });
         } catch (err) {
           return json({ error: "Falha ao enviar arquivo", detail: String(err?.message || err) }, 500);
         }
@@ -66,8 +90,8 @@ export default {
       object.writeHttpMetadata(headers);
       headers.set("etag", object.httpEtag);
       headers.set("cache-control", "public, max-age=3600");
-      const originalName = object.customMetadata?.originalName || key.split('/').pop();
-      const disposition = String(originalName).toLowerCase().endsWith('.apk') ? 'attachment' : 'inline';
+      const originalName = object.customMetadata?.originalName || key.split("/").pop();
+      const disposition = String(originalName).toLowerCase().endsWith(".apk") ? "attachment" : "inline";
       headers.set("content-disposition", `${disposition}; filename*=UTF-8''${encodeURIComponent(originalName)}`);
       return new Response(object.body, { headers });
     }
@@ -75,6 +99,22 @@ export default {
     return new Response("Not found", { status: 404 });
   },
 };
+
+function fileUrl(key) {
+  return "/files/" + String(key).split("/").map(encodeURIComponent).join("/");
+}
+
+function extensionOf(name) {
+  const base = String(name).split("/").pop() || "";
+  const i = base.lastIndexOf(".");
+  return i > 0 && i < base.length - 1 ? base.slice(i + 1).toUpperCase() : "ARQUIVO";
+}
+
+function removeExtension(name) {
+  const base = String(name).split("/").pop() || "";
+  const i = base.lastIndexOf(".");
+  return i > 0 ? base.slice(0, i) : base;
+}
 
 function isAdmin(request, env) {
   if (!env.ADMIN_PASSWORD) return false;
@@ -151,7 +191,7 @@ function adminPage() {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TVON Store • Admin</title>
 <style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui,Arial;background:#080b12;color:#f4f7fb}.wrap{max-width:1050px;margin:auto;padding:30px 18px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px}h1{margin:0;font-size:25px}.sub{color:#8793a7;margin-top:5px}.box{border:1px solid #20283a;background:#0e1421;border-radius:20px;padding:20px;margin-bottom:20px}.drop{border:1px dashed #384764;border-radius:16px;padding:28px;text-align:center}select,input,button{font:inherit}.controls{display:flex;gap:10px;flex-wrap:wrap;margin-top:15px}select,input[type=file]{background:#0a0f19;color:#fff;border:1px solid #2a3449;padding:11px;border-radius:10px}button{background:#2878ff;color:white;border:0;padding:11px 18px;border-radius:10px;font-weight:700;cursor:pointer}button:disabled{opacity:.55;cursor:not-allowed}button.danger{background:#2a1014;color:#ff8a95}.row{display:grid;grid-template-columns:1fr auto auto;gap:12px;align-items:center;padding:13px 0;border-bottom:1px solid #1b2333}.row:last-child{border:0}.name{overflow:hidden;text-overflow:ellipsis;word-break:break-word}.small{font-size:12px;color:#8d98aa}.link{color:#7eacff;text-decoration:none}.status{margin-top:12px;color:#9eabc0;min-height:18px}.status.ok{color:#78e59a}.status.err{color:#ff8a95}@media(max-width:620px){.row{grid-template-columns:1fr}.row button{width:100%}}
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui,Arial;background:#080b12;color:#f4f7fb}.wrap{max-width:1100px;margin:auto;padding:30px 18px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px}h1{margin:0;font-size:25px}.sub{color:#8793a7;margin-top:5px}.box{border:1px solid #20283a;background:#0e1421;border-radius:20px;padding:20px;margin-bottom:20px}.drop{border:1px dashed #384764;border-radius:16px;padding:28px;text-align:center}select,input,button{font:inherit}.controls{display:grid;grid-template-columns:minmax(220px,1.3fr) minmax(180px,1fr) 150px auto;gap:10px;margin-top:15px}select,input[type=file],input[type=text]{background:#0a0f19;color:#fff;border:1px solid #2a3449;padding:11px;border-radius:10px;min-width:0}button{background:#2878ff;color:white;border:0;padding:11px 18px;border-radius:10px;font-weight:700;cursor:pointer}button:disabled{opacity:.55;cursor:not-allowed}button.danger{background:#2a1014;color:#ff8a95}.toolbar{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:12px}.search{width:min(100%,360px)}.row{display:grid;grid-template-columns:minmax(0,1fr) 90px 100px 110px;gap:12px;align-items:center;padding:14px 0;border-bottom:1px solid #1b2333}.row:last-child{border:0}.name{font-weight:700;overflow:hidden;text-overflow:ellipsis;word-break:break-word}.filename{font-size:12px;color:#8793a7;margin-top:4px;overflow-wrap:anywhere}.badge{display:inline-flex;align-items:center;justify-content:center;border:1px solid #2a3449;background:#0a0f19;border-radius:999px;padding:6px 9px;font-size:12px;color:#b9c4d7}.small{font-size:12px;color:#8d98aa}.link{color:#7eacff;text-decoration:none}.status{margin-top:12px;color:#9eabc0;min-height:18px}.status.ok{color:#78e59a}.status.err{color:#ff8a95}.empty{padding:20px 0;color:#8793a7}@media(max-width:760px){.controls{grid-template-columns:1fr}.row{grid-template-columns:1fr 1fr}.row .info{grid-column:1/-1}.toolbar{align-items:stretch;flex-direction:column}.search{width:100%}}
 </style>
 </head>
 <body>
@@ -160,23 +200,30 @@ function adminPage() {
   <div class="box">
     <div class="drop">
       <strong>Enviar arquivo</strong>
-      <div class="sub">APK, imagem ou outro arquivo</div>
+      <div class="sub">O nome do arquivo será mantido no link. Enviar o mesmo nome novamente substitui o arquivo e mantém o endereço.</div>
       <div class="controls">
         <input id="file" type="file">
+        <input id="displayName" type="text" maxlength="160" placeholder="Nome para identificar (opcional)">
         <select id="folder"><option value="apks">APK</option><option value="images">Imagem</option><option value="files">Outro arquivo</option></select>
         <button id="uploadBtn" type="button">Enviar</button>
       </div>
       <div id="status" class="status"></div>
     </div>
   </div>
-  <div class="box"><strong>Arquivos enviados</strong><div id="list" class="sub" style="margin-top:12px">Carregando...</div></div>
+  <div class="box">
+    <div class="toolbar"><strong>Arquivos enviados</strong><input id="search" class="search" type="text" placeholder="Pesquisar por nome, arquivo ou formato..."></div>
+    <div id="list" class="sub">Carregando...</div>
+  </div>
 </div>
 <script>
 const fileInput = document.getElementById('file');
+const displayNameInput = document.getElementById('displayName');
 const folderInput = document.getElementById('folder');
 const uploadBtn = document.getElementById('uploadBtn');
 const statusEl = document.getElementById('status');
 const listEl = document.getElementById('list');
+const searchInput = document.getElementById('search');
+let allFiles = [];
 
 function fmt(n) {
   if (n < 1024) return n + ' B';
@@ -195,73 +242,98 @@ async function readJson(response) {
   try { return JSON.parse(text); } catch { return { error: text }; }
 }
 
+function renderFiles() {
+  const q = searchInput.value.trim().toLowerCase();
+  const data = !q ? allFiles : allFiles.filter(function(item) {
+    return [item.name, item.originalName, item.format, item.key].join(' ').toLowerCase().includes(q);
+  });
+
+  listEl.replaceChildren();
+  if (!data.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = q ? 'Nenhum arquivo encontrado.' : 'Nenhum arquivo enviado.';
+    listEl.appendChild(empty);
+    return;
+  }
+
+  data.forEach(function(item) {
+    const row = document.createElement('div');
+    row.className = 'row';
+
+    const info = document.createElement('div');
+    info.className = 'info';
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = item.name || item.originalName;
+    const filename = document.createElement('div');
+    filename.className = 'filename';
+    filename.textContent = item.originalName + ' • ' + fmt(item.size);
+    info.append(name, filename);
+
+    const format = document.createElement('span');
+    format.className = 'badge';
+    format.textContent = item.format || 'ARQUIVO';
+
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.textContent = 'Copiar link';
+    copy.addEventListener('click', async function() {
+      const full = location.origin + item.url;
+      try {
+        await navigator.clipboard.writeText(full);
+        setStatus('Link copiado: ' + item.originalName, 'ok');
+      } catch {
+        prompt('Copie o link:', full);
+      }
+    });
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'danger';
+    remove.textContent = 'Excluir';
+    remove.addEventListener('click', async function() {
+      if (!confirm('Excluir ' + item.originalName + '?')) return;
+      remove.disabled = true;
+      try {
+        const response = await fetch('/api/files/' + encodeURIComponent(item.key), { method: 'DELETE', credentials: 'same-origin' });
+        const result = await readJson(response);
+        if (!response.ok) throw new Error(result.error || 'Falha ao excluir');
+        setStatus('Arquivo excluído.', 'ok');
+        await loadFiles();
+      } catch (err) {
+        setStatus(err.message || 'Falha ao excluir.', 'err');
+        remove.disabled = false;
+      }
+    });
+
+    row.append(info, format, copy, remove);
+    listEl.appendChild(row);
+  });
+}
+
 async function loadFiles() {
   listEl.textContent = 'Carregando...';
   try {
     const response = await fetch('/api/files', { credentials: 'same-origin' });
     const data = await readJson(response);
     if (!response.ok) throw new Error(data.error || 'Falha ao carregar arquivos');
-
-    listEl.replaceChildren();
-    if (!data.length) {
-      const empty = document.createElement('div');
-      empty.className = 'sub';
-      empty.textContent = 'Nenhum arquivo enviado.';
-      listEl.appendChild(empty);
-      return;
-    }
-
-    data.forEach(function(item) {
-      const row = document.createElement('div');
-      row.className = 'row';
-
-      const info = document.createElement('div');
-      const name = document.createElement('div');
-      name.className = 'name';
-      name.textContent = item.key;
-      const size = document.createElement('div');
-      size.className = 'small';
-      size.textContent = fmt(item.size);
-      info.append(name, size);
-
-      const copy = document.createElement('button');
-      copy.type = 'button';
-      copy.textContent = 'Copiar link';
-      copy.addEventListener('click', async function() {
-        try {
-          await navigator.clipboard.writeText(location.origin + item.url);
-          setStatus('Link copiado.', 'ok');
-        } catch {
-          prompt('Copie o link:', location.origin + item.url);
-        }
-      });
-
-      const remove = document.createElement('button');
-      remove.type = 'button';
-      remove.className = 'danger';
-      remove.textContent = 'Excluir';
-      remove.addEventListener('click', async function() {
-        if (!confirm('Excluir este arquivo?')) return;
-        remove.disabled = true;
-        try {
-          const response = await fetch('/api/files/' + encodeURIComponent(item.key), { method: 'DELETE', credentials: 'same-origin' });
-          const result = await readJson(response);
-          if (!response.ok) throw new Error(result.error || 'Falha ao excluir');
-          setStatus('Arquivo excluído.', 'ok');
-          await loadFiles();
-        } catch (err) {
-          setStatus(err.message || 'Falha ao excluir.', 'err');
-          remove.disabled = false;
-        }
-      });
-
-      row.append(info, copy, remove);
-      listEl.appendChild(row);
-    });
+    allFiles = Array.isArray(data) ? data : [];
+    allFiles.sort(function(a, b) { return String(a.name || a.originalName).localeCompare(String(b.name || b.originalName), 'pt-BR'); });
+    renderFiles();
   } catch (err) {
     listEl.textContent = err.message || 'Falha ao carregar arquivos.';
   }
 }
+
+fileInput.addEventListener('change', function() {
+  const file = fileInput.files[0];
+  if (file && !displayNameInput.value.trim()) {
+    displayNameInput.value = file.name.replace(/\.[^.]+$/, '');
+  }
+});
+
+searchInput.addEventListener('input', renderFiles);
 
 uploadBtn.addEventListener('click', async function() {
   const file = fileInput.files[0];
@@ -273,6 +345,7 @@ uploadBtn.addEventListener('click', async function() {
   const form = new FormData();
   form.append('file', file);
   form.append('folder', folderInput.value);
+  form.append('displayName', displayNameInput.value.trim());
 
   uploadBtn.disabled = true;
   setStatus('Enviando...');
@@ -282,7 +355,8 @@ uploadBtn.addEventListener('click', async function() {
     const result = await readJson(response);
     if (!response.ok) throw new Error(result.error || 'Falha no upload');
     fileInput.value = '';
-    setStatus('Enviado com sucesso.', 'ok');
+    displayNameInput.value = '';
+    setStatus(result.replaced ? 'Arquivo atualizado. O link foi mantido.' : 'Enviado com sucesso.', 'ok');
     await loadFiles();
   } catch (err) {
     setStatus(err.message || 'Falha no upload.', 'err');
