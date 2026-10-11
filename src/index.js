@@ -409,22 +409,12 @@ function inferFolder(name) {
 }
 
 function isAdmin(request, env) {
-  // Solicitações internas do TVON 2.0: segredo compartilhado, nunca enviado ao navegador.
-  const internal = request.headers.get("X-MyStore-Internal-Key") || "";
-  if (env.TVON_INTERNAL_KEY && internal && internal === env.TVON_INTERNAL_KEY) return true;
-  // Quando o segredo interno é configurado, o login Basic antigo fica desativado.
-  if (env.TVON_INTERNAL_KEY || !env.ADMIN_PASSWORD) return false;
-  const auth = request.headers.get("authorization") || "";
-  if (!auth.startsWith("Basic ")) return false;
-  try {
-    const decoded = atob(auth.slice(6));
-    const i = decoded.indexOf(":");
-    const user = i >= 0 ? decoded.slice(0, i) : "";
-    const pass = i >= 0 ? decoded.slice(i + 1) : "";
-    return user === "admin" && pass === env.ADMIN_PASSWORD;
-  } catch {
-    return false;
-  }
+  // Somente o TVON 2.0 pode autorizar operações administrativas.
+  // Na ausência do segredo, negar acesso (fail closed).
+  const secret = env.TVON_INTERNAL_KEY;
+  const supplied = request.headers.get("X-MyStore-Internal-Key") || "";
+  if (!secret || !supplied) return false;
+  return supplied === secret;
 }
 
 function unauthorized() {
