@@ -409,6 +409,10 @@ function inferFolder(name) {
 }
 
 function isAdmin(request, env) {
+  // Solicitações internas do TVON 2.0: segredo compartilhado, nunca enviado ao navegador.
+  const internal = request.headers.get("X-MyStore-Internal-Key") || "";
+  if (env.TVON_INTERNAL_KEY && internal && internal === env.TVON_INTERNAL_KEY) return true;
+  // Acesso legado temporário durante a migração; remover após validação do login único.
   if (!env.ADMIN_PASSWORD) return false;
   const auth = request.headers.get("authorization") || "";
   if (!auth.startsWith("Basic ")) return false;
