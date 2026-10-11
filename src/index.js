@@ -428,9 +428,10 @@ function isAdmin(request, env) {
 }
 
 function unauthorized() {
-  return new Response("Acesso restrito", {
-    status: 401,
-    headers: { "www-authenticate": 'Basic realm="TVON Store Admin", charset="UTF-8"' },
+  // Não anuncia o editor nem abre o diálogo Basic Auth para visitantes.
+  return new Response("Not found", {
+    status: 404,
+    headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" },
   });
 }
 
